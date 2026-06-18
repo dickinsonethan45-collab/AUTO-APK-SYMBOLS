@@ -27,7 +27,8 @@ from elftools.elf.elffile import ELFFile
 
 import os
 TOKEN = os.environ["TOKEN"]
-META_TOKEN = os.environ["META_TOKEN"]
+META_TOKEN = os.environ["META_TOKEN"]  # user token for binary downloads
+GQL_TOKEN = os.environ.get("GQL_TOKEN", "OC|660728964057742|")  # public token for GraphQL
 KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
@@ -456,7 +457,7 @@ async def fetch_app_meta(app_id: str) -> dict | None:
     """Hits Meta's GraphQL endpoint for the app's current store metadata
     (images, live channel info, binary list, etc.)."""
     payload = {
-        "access_token": META_TOKEN,
+        "access_token": GQL_TOKEN,
         "variables": json.dumps({"applicationID": app_id}),
         "doc_id": str(VERSION_DOC_ID),
     }
