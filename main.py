@@ -833,7 +833,7 @@ async def build_and_post_modded_apk(apk_path: str, version_code: str, channel):
         print(f"[autoapk] TIMING gofile upload: {time.monotonic() - t0:.1f}s")
 
     await apk_channel.send(
-        f"📦 **Animal Company `{version_code}`** — bunimod-patched APK ready:\n{link}"
+        f"@everyone 📦 **Animal Company `{version_code}`** — bunimod-patched APK ready:\n{link}"
     )
 
 
