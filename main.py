@@ -725,9 +725,10 @@ def build_modded_apk_sync(apk_path: str, work_dir: str) -> str:
         )
 
     decoded_dir = os.path.join(work_dir, "decoded")
+    apktool_env = {**os.environ, "JAVA_OPTS": "-Xmx512m"}
     subprocess.run(
         [APKTOOL_CMD, "d", "-r", "-f", "-o", decoded_dir, apk_path],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=apktool_env,
     )
 
     _patch_smali(decoded_dir)
