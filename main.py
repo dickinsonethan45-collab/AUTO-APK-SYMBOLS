@@ -25,7 +25,10 @@ import subprocess
 from datetime import datetime
 from elftools.elf.elffile import ELFFile
 
-from config import TOKEN, META_TOKEN, KEYSTORE_PASSWORD
+import os
+TOKEN = os.environ["TOKEN"]
+META_TOKEN = os.environ["META_TOKEN"]
+KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
 CANONICAL = [
