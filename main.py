@@ -464,8 +464,11 @@ async def fetch_app_meta(app_id: str) -> dict | None:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(GQL_URL, data=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                resp.raise_for_status()
-                return await resp.json(content_type=None)
+                body = await resp.text()
+                if resp.status != 200:
+                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}")
+                    return None
+                return json.loads(body)
     except Exception as e:
         print(f"[watcher] GraphQL fetch error: {e}")
         return None
