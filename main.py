@@ -291,8 +291,10 @@ NOISE_EXACT = {
 def is_noise(name: str) -> bool:
     if not name:
         return True
-    if name.startswith("_Z") or name.startswith("_GLOBAL") or name.startswith("__"):
+    if name.startswith("_Z") or name.startswith("_GLOBAL"):
         return True
+    # Note: removed "__" filter because obfuscated IL2CPP hashes starting with __
+    # (like __uCWQCjgHT) are legitimate exports and should NOT be filtered
     noise_prefixes = (
         "SystemNative_", "GlobalizationNative_", "CryptoNative_", "Dll",
         "UnityAdsEngine", "JNI_",
