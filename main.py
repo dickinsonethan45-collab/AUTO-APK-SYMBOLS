@@ -455,6 +455,9 @@ def update_managed_files(pairs: list[tuple[str, str]]) -> tuple[list, list[str]]
 # This is Meta's own store data (graph.oculus.com/graphql), not OculusDB.
 # ---------------------------------------------------------------------------
 
+GQL_LAST_ERROR = {"reason": None}
+
+
 async def fetch_app_meta(app_id: str) -> dict | None:
     """Hits Meta's GraphQL endpoint for the app's current store metadata
     (images, live channel info, binary list, etc.)."""
@@ -463,16 +466,25 @@ async def fetch_app_meta(app_id: str) -> dict | None:
         "variables": json.dumps({"applicationID": app_id}),
         "doc_id": str(VERSION_DOC_ID),
     }
+    headers = {
+        "User-Agent": "Oculus/1 CFNetwork/1408.0.4 Darwin/22.5.0",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(GQL_URL, data=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.post(GQL_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}")
+                    reason = f"HTTP {resp.status} — {body[:200]}"
+                    print(f"[watcher] GraphQL fetch error: {reason}")
+                    GQL_LAST_ERROR["reason"] = reason
                     return None
+                GQL_LAST_ERROR["reason"] = None
                 return json.loads(body)
     except Exception as e:
-        print(f"[watcher] GraphQL fetch error: {e}")
+        reason = f"{type(e).__name__}: {e}"
+        print(f"[watcher] GraphQL fetch error: {reason}")
+        GQL_LAST_ERROR["reason"] = reason
         return None
 
 
@@ -950,7 +962,7 @@ async def version_watcher():
             embed.set_author(name="AMB Symbols", icon_url=bot.user.display_avatar.url)
             embed.add_field(
                 name="🔴  Status",
-                value="Could not reach Meta's GraphQL endpoint. Retrying quietly in the background.",
+                value=f"Could not reach Meta's GraphQL endpoint.\n```{GQL_LAST_ERROR['reason'] or 'unknown'}```\nRetrying quietly in the background.",
                 inline=False,
             )
             embed.set_footer(text=f"Checked at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -1222,7 +1234,7 @@ async def checkversion(interaction: discord.Interaction):
     latest = await fetch_latest_version()
     state = load_version()
     if not latest:
-        await interaction.followup.send("⚠️ Could not reach Meta's GraphQL endpoint.", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Could not reach Meta's GraphQL endpoint.\n```{GQL_LAST_ERROR['reason'] or 'unknown'}```", ephemeral=True)
         return
     last = state.get("version_code", "none")
     status = "✅ Up to date" if latest["version_code"] == last else "🆕 New version available!"
@@ -1237,7 +1249,7 @@ async def metaraw(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     meta = await fetch_app_meta(AC_APP_ID)
     if not meta:
-        await interaction.followup.send("Could not reach Meta's GraphQL endpoint.", ephemeral=True)
+        await interaction.followup.send(f"Could not reach Meta's GraphQL endpoint.\n```{GQL_LAST_ERROR['reason'] or 'unknown'}```", ephemeral=True)
         return
 
     path = "/tmp/meta_raw_dump.json"
