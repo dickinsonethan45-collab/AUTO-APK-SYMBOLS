@@ -28,7 +28,7 @@ from elftools.elf.elffile import ELFFile
 import os
 TOKEN = os.environ["TOKEN"]
 META_TOKEN = os.environ["META_TOKEN"]  # user token for binary downloads
-GQL_TOKEN = os.environ.get("GQL_TOKEN", "OC|752908224809889|")  # public token for GraphQL
+GQL_TOKEN = os.environ.get("GQL_TOKEN", "OC|660728964057742|")  # public token for GraphQL
 KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
@@ -338,10 +338,7 @@ META_CDN              = "https://securecdn.oculus.com/binaries/download/"
 VERSION_FILE          = "version_state.json"
 POLL_SECONDS          = 60
 GQL_URL               = "https://graph.oculus.com/graphql"
-# Step 1: resolve the app's LIVE release channel id.
-VERSION_DOC_ID_CHANNEL = int(os.environ.get("VERSION_DOC_ID_CHANNEL", "3828663700542720"))
-# Step 2: fetch that channel's latest_supported_binary (id + version_code).
-VERSION_DOC_ID_BINARY  = int(os.environ.get("VERSION_DOC_ID_BINARY", "3973666182694273"))
+VERSION_DOC_ID        = 6771539532935162
 
 MANAGED_DIR           = "managed_files"          # registered .ts files live here
 MANAGED_CONFIG_FILE   = "managed_files_config.json"  # {channel_id, files: [...]}
@@ -458,81 +455,63 @@ def update_managed_files(pairs: list[tuple[str, str]]) -> tuple[list, list[str]]
 # This is Meta's own store data (graph.oculus.com/graphql), not OculusDB.
 # ---------------------------------------------------------------------------
 
-GQL_LAST_ERROR = {"reason": None}
-
-_GQL_HEADERS = {
-    "User-Agent": "Oculus/1 CFNetwork/1408.0.4 Darwin/22.5.0",
-    "Content-Type": "application/x-www-form-urlencoded",
-}
-
-
-async def _gql_request(doc_id: int, variables: dict) -> dict | None:
-    """Low-level POST to graph.oculus.com/graphql. Records the failure
-    reason (HTTP status + body, or exception) in GQL_LAST_ERROR so it can
-    be surfaced to Discord instead of a generic 'could not reach' message."""
+async def fetch_app_meta(app_id: str) -> dict | None:
+    """Hits Meta's GraphQL endpoint for the app's current store metadata
+    (images, live channel info, binary list, etc.)."""
     payload = {
         "access_token": GQL_TOKEN,
-        "variables": json.dumps(variables),
-        "doc_id": str(doc_id),
+        "variables": json.dumps({"applicationID": app_id}),
+        "doc_id": str(VERSION_DOC_ID),
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(GQL_URL, data=payload, headers=_GQL_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.post(GQL_URL, data=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    reason = f"HTTP {resp.status} — {body[:200]}"
-                    print(f"[watcher] GraphQL fetch error: {reason}")
-                    GQL_LAST_ERROR["reason"] = reason
+                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}")
                     return None
-                GQL_LAST_ERROR["reason"] = None
                 return json.loads(body)
     except Exception as e:
-        reason = f"{type(e).__name__}: {e}"
-        print(f"[watcher] GraphQL fetch error: {reason}")
-        GQL_LAST_ERROR["reason"] = reason
+        print(f"[watcher] GraphQL fetch error: {e}")
         return None
-
-
-async def fetch_app_meta(app_id: str) -> dict | None:
-    """Two-step fetch against Meta's current GraphQL schema:
-      1. Resolve the app's LIVE release channel id.
-      2. Fetch that channel, which carries latest_supported_binary
-         (id + version_code) directly — no more separate primary_binaries
-         matching needed like the old schema required.
-    Returns the raw response from step 2 (shape: data.node.*), or None."""
-    channel_resp = await _gql_request(VERSION_DOC_ID_CHANNEL, {"applicationID": app_id})
-    if not channel_resp:
-        return None
-
-    try:
-        nodes = channel_resp["data"]["node"]["release_channels"]["nodes"]
-    except (KeyError, TypeError) as e:
-        reason = f"Unexpected shape from channel-list query: {e}"
-        print(f"[watcher] {reason}")
-        GQL_LAST_ERROR["reason"] = reason
-        return None
-
-    if not nodes:
-        GQL_LAST_ERROR["reason"] = "App has no release channels"
-        return None
-
-    live_node = next((n for n in nodes if n.get("channel_name") == "LIVE"), nodes[0])
-    channel_id = live_node.get("id")
-    if not channel_id:
-        GQL_LAST_ERROR["reason"] = "LIVE release channel has no id"
-        return None
-
-    return await _gql_request(VERSION_DOC_ID_BINARY, {"releaseChannelID": channel_id})
 
 
 def _parse_latest_version(meta: dict) -> dict | None:
-    """Pulls {version_code, binary_id} straight out of a fetch_app_meta()
-    response (data.node.latest_supported_binary). Returns None if the
-    shape doesn't match what we expect (e.g. Meta changed their schema)."""
+    """Pulls {version_code, binary_id} for the current LIVE build straight
+    out of a fetch_app_meta() response. Returns None if the shape doesn't
+    match what we expect (e.g. Meta changed their schema)."""
     try:
-        live_binary = meta["data"]["node"]["latest_supported_binary"]
+        node = meta["data"]["node"]
+        live_nodes = node.get("liveChannel", {}).get("nodes", [])
+        if not live_nodes:
+            print("[watcher] Meta response has no liveChannel entry")
+            return None
+
+        live_binary = live_nodes[0].get("latest_supported_binary")
+        if not live_binary or not live_binary.get("id"):
+            print("[watcher] Meta liveChannel entry has no latest_supported_binary")
+            return None
+
         binary_id = live_binary["id"]
-        version_code = live_binary["version_code"]
+
+        # primary_binaries carries the integer version_code alongside the id
+        version_code = None
+        for b in node.get("primary_binaries", {}).get("nodes", []):
+            if b.get("id") == binary_id:
+                version_code = b.get("version_code")
+                break
+
+        if version_code is None:
+            # Fall back to the dotted version string, e.g. "1.78.1.3091" -> 3091
+            version_str = live_binary.get("version", "")
+            tail = version_str.rsplit(".", 1)[-1]
+            if tail.isdigit():
+                version_code = int(tail)
+
+        if version_code is None:
+            print(f"[watcher] Could not extract version_code for binary {binary_id}")
+            return None
+
         return {"version_code": str(version_code), "binary_id": str(binary_id)}
     except (KeyError, TypeError) as e:
         print(f"[watcher] Unexpected Meta response shape: {e}")
@@ -971,7 +950,7 @@ async def version_watcher():
             embed.set_author(name="AMB Symbols", icon_url=bot.user.display_avatar.url)
             embed.add_field(
                 name="🔴  Status",
-                value=f"Could not reach Meta's GraphQL endpoint.\n```{GQL_LAST_ERROR['reason'] or 'unknown'}```\nRetrying quietly in the background.",
+                value="Could not reach Meta's GraphQL endpoint. Retrying quietly in the background.",
                 inline=False,
             )
             embed.set_footer(text=f"Checked at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -1243,7 +1222,7 @@ async def checkversion(interaction: discord.Interaction):
     latest = await fetch_latest_version()
     state = load_version()
     if not latest:
-        await interaction.followup.send(f"⚠️ Could not reach Meta's GraphQL endpoint.\n```{GQL_LAST_ERROR['reason'] or 'unknown'}```", ephemeral=True)
+        await interaction.followup.send("⚠️ Could not reach Meta's GraphQL endpoint.", ephemeral=True)
         return
     last = state.get("version_code", "none")
     status = "✅ Up to date" if latest["version_code"] == last else "🆕 New version available!"
@@ -1258,7 +1237,7 @@ async def metaraw(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     meta = await fetch_app_meta(AC_APP_ID)
     if not meta:
-        await interaction.followup.send(f"Could not reach Meta's GraphQL endpoint.\n```{GQL_LAST_ERROR['reason'] or 'unknown'}```", ephemeral=True)
+        await interaction.followup.send("Could not reach Meta's GraphQL endpoint.", ephemeral=True)
         return
 
     path = "/tmp/meta_raw_dump.json"
