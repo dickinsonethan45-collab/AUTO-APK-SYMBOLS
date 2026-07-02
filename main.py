@@ -478,9 +478,20 @@ async def fetch_app_meta(app_id: str) -> dict | None:
         "variables": json.dumps({"applicationID": app_id}),
         "doc_id": str(VERSION_DOC_ID),
     }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.meta.com",
+        "Referer": "https://www.meta.com/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+    }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(GQL_URL, data=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.post(
+                GQL_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
                 body = await resp.text()
                 if resp.status != 200:
                     print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}", flush=True)
