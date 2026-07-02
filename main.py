@@ -508,9 +508,27 @@ def _parse_latest_version(meta: dict) -> dict | None:
     match what we expect (e.g. Meta changed their schema)."""
     try:
         node = meta["data"]["node"]
+
+        # Current shape (as of the 2026-07-02 doc_id): node.release_channels.nodes[]
+        # Each entry has channel_name (e.g. "LIVE") and its own
+        # latest_supported_binary with version_code already included.
+        channels = node.get("release_channels", {}).get("nodes", [])
+        live_channel = next((c for c in channels if c.get("channel_name") == "LIVE"), None)
+        if live_channel is None and channels:
+            live_channel = channels[0]  # fall back to first channel if none named LIVE
+
+        if live_channel:
+            live_binary = live_channel.get("latest_supported_binary")
+            if live_binary and live_binary.get("id") and live_binary.get("version_code") is not None:
+                return {
+                    "version_code": str(live_binary["version_code"]),
+                    "binary_id": str(live_binary["id"]),
+                }
+
+        # Legacy shape fallback (older doc_id): node.liveChannel.nodes[]
         live_nodes = node.get("liveChannel", {}).get("nodes", [])
         if not live_nodes:
-            print("[watcher] Meta response has no liveChannel entry", flush=True)
+            print("[watcher] Meta response has no release_channels/liveChannel entry", flush=True)
             return None
 
         live_binary = live_nodes[0].get("latest_supported_binary")
