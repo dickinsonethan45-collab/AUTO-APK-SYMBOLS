@@ -353,7 +353,7 @@ META_CDN              = "https://securecdn.oculus.com/binaries/download/"
 VERSION_FILE          = "version_state.json"
 POLL_SECONDS          = 60
 GQL_URL               = "https://graph.oculus.com/graphql"
-VERSION_DOC_ID        = 6771539532935162
+VERSION_DOC_ID        = 3828663700542720
 
 MANAGED_DIR           = "managed_files"          # registered .ts files live here
 MANAGED_CONFIG_FILE   = "managed_files_config.json"  # {channel_id, files: [...]}
