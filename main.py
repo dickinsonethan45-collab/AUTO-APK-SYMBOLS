@@ -26,10 +26,25 @@ from datetime import datetime
 from elftools.elf.elffile import ELFFile
 
 import os
+
+def _clean_token(raw: str) -> str:
+    """Defends against tokens copy-pasted straight out of a browser URL bar,
+    which often drag along trailing query params like '&state=...' or a
+    leading '?'. Only the token itself (up to the first stray '&') is kept.
+    Also strips whitespace/newlines that sneak in from copy-paste."""
+    if not raw:
+        return raw
+    cleaned = raw.strip().lstrip("?")
+    cleaned = cleaned.split("&")[0]  # drop any trailing &key=value junk
+    return cleaned
+
 TOKEN = os.environ["TOKEN"]
-META_TOKEN = os.environ["META_TOKEN"]  # user token for binary downloads
-GQL_TOKEN = os.environ.get("GQL_TOKEN", "OC|660728964057742|")  # public token for GraphQL
+META_TOKEN = _clean_token(os.environ["META_TOKEN"])  # user token for binary downloads
+GQL_TOKEN = _clean_token(os.environ.get("GQL_TOKEN", "OC|660728964057742|"))  # public token for GraphQL
 KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
+
+print(f"[startup] META_TOKEN loaded, length={len(META_TOKEN)}, starts='{META_TOKEN[:8]}...'")
+print(f"[startup] GQL_TOKEN loaded, length={len(GQL_TOKEN)}, starts='{GQL_TOKEN[:8]}...'")
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
 CANONICAL = [
@@ -586,7 +601,14 @@ async def download_apk(binary_id: str, dest: str):
     url = f"{META_CDN}?id={binary_id}&access_token={META_TOKEN}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
-            resp.raise_for_status()
+            if resp.status != 200:
+                body_preview = (await resp.text())[:300]
+                if resp.status in (401, 403):
+                    raise RuntimeError(
+                        f"Meta rejected META_TOKEN (HTTP {resp.status}) — token is expired or malformed. "
+                        f"Refresh oc_ac_at / META_TOKEN in Railway. Body: {body_preview}"
+                    )
+                raise RuntimeError(f"Download failed (HTTP {resp.status}): {body_preview}")
             with open(dest, "wb") as f:
                 async for chunk in resp.content.iter_chunked(1 << 20):
                     f.write(chunk)
