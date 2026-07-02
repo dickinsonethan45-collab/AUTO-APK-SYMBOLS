@@ -1163,9 +1163,22 @@ async def setlib(interaction: discord.Interaction, file: discord.Attachment):
 @bot.tree.command(name="buildapk", description="Manually rebuild + upload a bunimod-patched APK for the last known AC version")
 async def buildapk(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    state = load_version()
-    binary_id = state.get("binary_id")
-    version_code = state.get("version_code", "unknown")
+
+    # Always pull a FRESH binary_id from Meta instead of trusting the
+    # possibly-stale version_state.json — the watcher can flag a version as
+    # live before Meta finishes attaching the actual binary artifact to it,
+    # which causes 404s on the id that was saved at detection time.
+    latest = await fetch_latest_version()
+    if latest:
+        binary_id = latest["binary_id"]
+        version_code = latest["version_code"]
+        save_version({"version_code": version_code, "binary_id": binary_id})
+    else:
+        # Meta unreachable right now — fall back to last known good state.
+        state = load_version()
+        binary_id = state.get("binary_id")
+        version_code = state.get("version_code", "unknown")
+
     if not binary_id:
         await interaction.followup.send(
             "No known binary_id yet — wait for the watcher to find a version first.", ephemeral=True
@@ -1177,7 +1190,13 @@ async def buildapk(interaction: discord.Interaction):
         try:
             await download_apk(binary_id, apk_path)
         except Exception as e:
-            await interaction.followup.send(f"APK download failed: `{e}`", ephemeral=True)
+            await interaction.followup.send(
+                f"APK download failed: `{e}`\n"
+                f"(binary_id={binary_id}, version={version_code} — if this keeps 404ing "
+                f"on a freshly-fetched id, the binary likely isn't propagated on Meta's "
+                f"CDN yet — retry in a bit.)",
+                ephemeral=True,
+            )
             return
         channel = bot.get_channel(APK_CHANNEL_ID) or await bot.fetch_channel(APK_CHANNEL_ID)
         await build_and_post_modded_apk(apk_path, version_code, channel)
