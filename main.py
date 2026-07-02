@@ -43,8 +43,8 @@ META_TOKEN = _clean_token(os.environ["META_TOKEN"])  # user token for binary dow
 GQL_TOKEN = _clean_token(os.environ.get("GQL_TOKEN", "OC|660728964057742|"))  # public token for GraphQL
 KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
 
-print(f"[startup] META_TOKEN loaded, length={len(META_TOKEN)}, starts='{META_TOKEN[:8]}...'")
-print(f"[startup] GQL_TOKEN loaded, length={len(GQL_TOKEN)}, starts='{GQL_TOKEN[:8]}...'")
+print(f"[startup] META_TOKEN loaded, length={len(META_TOKEN)}, starts='{META_TOKEN[:8]}...'", flush=True)
+print(f"[startup] GQL_TOKEN loaded, length={len(GQL_TOKEN)}, starts='{GQL_TOKEN[:8]}...'", flush=True)
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
 CANONICAL = [
@@ -483,11 +483,11 @@ async def fetch_app_meta(app_id: str) -> dict | None:
             async with session.post(GQL_URL, data=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}")
+                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}", flush=True)
                     return None
                 return json.loads(body)
     except Exception as e:
-        print(f"[watcher] GraphQL fetch error: {e}")
+        print(f"[watcher] GraphQL fetch error: {e}", flush=True)
         return None
 
 
@@ -499,12 +499,12 @@ def _parse_latest_version(meta: dict) -> dict | None:
         node = meta["data"]["node"]
         live_nodes = node.get("liveChannel", {}).get("nodes", [])
         if not live_nodes:
-            print("[watcher] Meta response has no liveChannel entry")
+            print("[watcher] Meta response has no liveChannel entry", flush=True)
             return None
 
         live_binary = live_nodes[0].get("latest_supported_binary")
         if not live_binary or not live_binary.get("id"):
-            print("[watcher] Meta liveChannel entry has no latest_supported_binary")
+            print("[watcher] Meta liveChannel entry has no latest_supported_binary", flush=True)
             return None
 
         binary_id = live_binary["id"]
@@ -524,12 +524,12 @@ def _parse_latest_version(meta: dict) -> dict | None:
                 version_code = int(tail)
 
         if version_code is None:
-            print(f"[watcher] Could not extract version_code for binary {binary_id}")
+            print(f"[watcher] Could not extract version_code for binary {binary_id}", flush=True)
             return None
 
         return {"version_code": str(version_code), "binary_id": str(binary_id)}
     except (KeyError, TypeError) as e:
-        print(f"[watcher] Unexpected Meta response shape: {e}")
+        print(f"[watcher] Unexpected Meta response shape: {e}", flush=True)
         return None
 
 
@@ -548,15 +548,15 @@ async def fetch_latest_version() -> dict | None:
 
         if result is not None:
             result["meta"] = meta
-            print(f"[watcher] version_code={result['version_code']} binary_id={result['binary_id']}")
+            print(f"[watcher] version_code={result['version_code']} binary_id={result['binary_id']}", flush=True)
             return result
 
         if attempt < attempts:
             delay = META_RETRY_DELAYS[attempt - 1]
-            print(f"[watcher] Meta fetch attempt {attempt}/{attempts} failed — retrying in {delay}s")
+            print(f"[watcher] Meta fetch attempt {attempt}/{attempts} failed — retrying in {delay}s", flush=True)
             await asyncio.sleep(delay)
 
-    print(f"[watcher] Meta unreachable after {attempts} attempts")
+    print(f"[watcher] Meta unreachable after {attempts} attempts", flush=True)
     return None
 
 
@@ -848,7 +848,7 @@ async def build_and_post_modded_apk(apk_path: str, version_code: str, channel):
         except Exception as e:
             await apk_channel.send(f"⚠️ Version `{version_code}` — APK build failed: `{e}`")
             return
-        print(f"[autoapk] TIMING build modded apk: {time.monotonic() - t0:.1f}s")
+        print(f"[autoapk] TIMING build modded apk: {time.monotonic() - t0:.1f}s", flush=True)
 
         t0 = time.monotonic()
         try:
@@ -858,7 +858,7 @@ async def build_and_post_modded_apk(apk_path: str, version_code: str, channel):
                 f"⚠️ Version `{version_code}` — built fine but gofile upload failed: `{e}`"
             )
             return
-        print(f"[autoapk] TIMING gofile upload: {time.monotonic() - t0:.1f}s")
+        print(f"[autoapk] TIMING gofile upload: {time.monotonic() - t0:.1f}s", flush=True)
 
     await apk_channel.send(
         f"@everyone 📦 **Animal Company `{version_code}`** — bunimod-patched APK ready:\n{link}"
@@ -868,7 +868,7 @@ async def build_and_post_modded_apk(apk_path: str, version_code: str, channel):
 async def run_pipeline(version_code: str, binary_id: str, channel):
     """Full pipeline: download APK → extract .so → generate files → post."""
     t_start = time.monotonic()
-    print(f"[watcher] Running pipeline for version {version_code}, binary {binary_id}")
+    print(f"[watcher] Running pipeline for version {version_code}, binary {binary_id}", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         apk_path = os.path.join(tmp, "AnimalCompany.apk")
 
@@ -881,7 +881,7 @@ async def run_pipeline(version_code: str, binary_id: str, channel):
         download_elapsed = time.monotonic() - t0
         apk_size_mb = os.path.getsize(apk_path) / (1024 * 1024)
         speed_mbps = apk_size_mb / download_elapsed if download_elapsed > 0 else 0
-        print(f"[watcher] TIMING download: {download_elapsed:.1f}s for {apk_size_mb:.1f}MB ({speed_mbps:.2f} MB/s)")
+        print(f"[watcher] TIMING download: {download_elapsed:.1f}s for {apk_size_mb:.1f}MB ({speed_mbps:.2f} MB/s)", flush=True)
 
         t0 = time.monotonic()
         try:
@@ -889,7 +889,7 @@ async def run_pipeline(version_code: str, binary_id: str, channel):
         except Exception as e:
             await channel.send(f"⚠️ Version `{version_code}` — failed to extract libil2cpp.so: `{e}`")
             return
-        print(f"[watcher] TIMING extract .so from APK: {time.monotonic() - t0:.1f}s")
+        print(f"[watcher] TIMING extract .so from APK: {time.monotonic() - t0:.1f}s", flush=True)
 
         t0 = time.monotonic()
         try:
@@ -897,7 +897,7 @@ async def run_pipeline(version_code: str, binary_id: str, channel):
         except Exception as e:
             await channel.send(f"⚠️ Version `{version_code}` — failed to parse ELF: `{e}`")
             return
-        print(f"[watcher] TIMING parse ELF exports: {time.monotonic() - t0:.1f}s")
+        print(f"[watcher] TIMING parse ELF exports: {time.monotonic() - t0:.1f}s", flush=True)
 
         now = datetime.now().strftime("%m/%d/%Y, %H:%M:%S")
         out_dir = os.path.join(tmp, "out")
@@ -910,7 +910,7 @@ async def run_pipeline(version_code: str, binary_id: str, channel):
             content=f"@everyone 🆕 **Animal Company updated** — version `{version_code}`\n**{count}** symbols mapped from **{len(exports)}** exports.",
             files=[discord.File(p, filename=os.path.basename(p)) for p in file_paths],
         )
-        print(f"[watcher] TIMING build + post symbol files: {time.monotonic() - t0:.1f}s")
+        print(f"[watcher] TIMING build + post symbol files: {time.monotonic() - t0:.1f}s", flush=True)
 
         t0 = time.monotonic()
         managed_files, managed_errors = update_managed_files(pairs)
@@ -925,17 +925,17 @@ async def run_pipeline(version_code: str, binary_id: str, channel):
             )
         if managed_errors:
             await channel.send("\n".join(f"⚠️ {e}" for e in managed_errors))
-        print(f"[watcher] TIMING patch + post managed files: {time.monotonic() - t0:.1f}s")
+        print(f"[watcher] TIMING patch + post managed files: {time.monotonic() - t0:.1f}s", flush=True)
 
         t0 = time.monotonic()
         try:
             await build_and_post_modded_apk(apk_path, version_code, channel)
         except Exception as e:
             await channel.send(f"⚠️ Version `{version_code}` — auto-APK step crashed: `{e}`")
-        print(f"[watcher] TIMING auto-apk build+upload: {time.monotonic() - t0:.1f}s")
+        print(f"[watcher] TIMING auto-apk build+upload: {time.monotonic() - t0:.1f}s", flush=True)
 
         total_elapsed = time.monotonic() - t_start
-        print(f"[watcher] TIMING total pipeline: {total_elapsed:.1f}s ({total_elapsed / 60:.1f} min) — version {version_code}")
+        print(f"[watcher] TIMING total pipeline: {total_elapsed:.1f}s ({total_elapsed / 60:.1f} min) — version {version_code}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -978,7 +978,7 @@ async def version_watcher():
             embed.set_footer(text=f"Checked at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
             await logger.send(embed=embed)
         else:
-            print("[watcher] Meta still unreachable — suppressing duplicate alert")
+            print("[watcher] Meta still unreachable — suppressing duplicate alert", flush=True)
         return
 
     if _meta_outage["down"]:
@@ -991,7 +991,7 @@ async def version_watcher():
 
     state = load_version()
     last_version = state.get("version_code", "")
-    print(f"[watcher] last={last_version!r}  latest={latest['version_code']!r}")
+    print(f"[watcher] last={last_version!r}  latest={latest['version_code']!r}", flush=True)
 
     if latest["version_code"] != last_version:
         save_version({"version_code": latest["version_code"], "binary_id": latest["binary_id"]})
@@ -1018,7 +1018,7 @@ async def version_watcher():
             channel = bot.get_channel(ANNOUNCE_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCE_CHANNEL_ID)
             await run_pipeline(latest["version_code"], latest["binary_id"], channel)
         else:
-            print(f"[watcher] Seeded initial version: {latest['version_code']}")
+            print(f"[watcher] Seeded initial version: {latest['version_code']}", flush=True)
             embed = discord.Embed(color=0x3498db)
             embed.set_author(name="AMB Symbols", icon_url=bot.user.display_avatar.url)
             embed.add_field(name="🔵  Watcher Started", value=f"```{latest['version_code']}```", inline=False)
@@ -1042,7 +1042,7 @@ async def watcher_error(error: Exception):
     # Without this, an unhandled exception in version_watcher() just kills
     # the loop forever with no further polling and no Discord message —
     # it would look "stuck" rather than crashed. Log it and restart instead.
-    print(f"[watcher] Unhandled error, restarting loop: {error!r}")
+    print(f"[watcher] Unhandled error, restarting loop: {error!r}", flush=True)
     if not version_watcher.is_running():
         version_watcher.restart()
 
@@ -1051,7 +1051,7 @@ async def watcher_error(error: Exception):
 async def on_ready():
     await bot.tree.sync()
     version_watcher.start()
-    print(f"Logged in as {bot.user} — polling every {POLL_SECONDS}s")
+    print(f"Logged in as {bot.user} — polling every {POLL_SECONDS}s", flush=True)
 
 
 @bot.tree.command(name="setupfiles", description="Register .ts files to auto-update with new symbols, and pick where updates get posted")
