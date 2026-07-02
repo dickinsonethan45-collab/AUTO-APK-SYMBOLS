@@ -18,6 +18,8 @@ import json
 import os
 import re
 import time
+import uuid
+import urllib.parse
 import zipfile
 import tempfile
 import shutil
@@ -42,6 +44,16 @@ TOKEN = os.environ["TOKEN"]
 META_TOKEN = _clean_token(os.environ["META_TOKEN"])  # user token for binary downloads
 GQL_TOKEN = _clean_token(os.environ.get("GQL_TOKEN", "OC|660728964057742|"))  # public token for GraphQL
 KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
+
+# --- Auto-refresh for the short-lived META_TOKEN/GQL_TOKEN ---------------
+OC_RT = _clean_token(os.environ.get("OC_RT", ""))  # long-lived Oculus refresh cookie
+RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "")
+RAILWAY_PROJECT_ID = "c4205da6-ceac-471b-b5af-c076fec2cf47"
+RAILWAY_ENVIRONMENT_ID = "8f34eb7c-da05-4fb8-be35-0cc180cb084b"
+RAILWAY_SERVICE_ID = "0cee8a02-a2c6-42b8-8054-be244ec29a9c"
+RAILWAY_API_URL = "https://backboard.railway.com/graphql/v2"
+AC_CLIENT_TOKEN = "OC|660728964057742|"  # public web-app client id used by the refresh flow
+TOKEN_REFRESH_MINUTES = 10  # observed token lifetime is ~15-20 min — refresh well before that
 
 print(f"[startup] META_TOKEN loaded, length={len(META_TOKEN)}, starts='{META_TOKEN[:8]}...'", flush=True)
 print(f"[startup] GQL_TOKEN loaded, length={len(GQL_TOKEN)}, starts='{GQL_TOKEN[:8]}...'", flush=True)
@@ -986,6 +998,114 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 _meta_outage = {"down": False}
 
 
+async def push_railway_variables(vars_to_set: dict):
+    """Persists updated env vars to Railway via the public GraphQL API so
+    they survive a restart. skipDeploys=True so this doesn't bounce the
+    whole bot every refresh cycle — the running process already has the
+    fresh token in memory via the global reassignment in refresh_meta_token()."""
+    if not RAILWAY_API_TOKEN:
+        print("[refresh] RAILWAY_API_TOKEN not set — skipping persist to Railway", flush=True)
+        return
+
+    mutation = "mutation variableUpsert($input: VariableUpsertInput!) { variableUpsert(input: $input) }"
+    headers = {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"}
+
+    async with aiohttp.ClientSession() as session:
+        for name, value in vars_to_set.items():
+            payload = {
+                "query": mutation,
+                "variables": {
+                    "input": {
+                        "projectId": RAILWAY_PROJECT_ID,
+                        "environmentId": RAILWAY_ENVIRONMENT_ID,
+                        "serviceId": RAILWAY_SERVICE_ID,
+                        "name": name,
+                        "value": value,
+                        "skipDeploys": True,
+                    }
+                },
+            }
+            try:
+                async with session.post(
+                    RAILWAY_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status != 200 or '"errors"' in body:
+                        print(f"[refresh] Railway variableUpsert failed for {name}: {resp.status} — {body[:300]}", flush=True)
+                    else:
+                        print(f"[refresh] Persisted {name} to Railway", flush=True)
+            except Exception as e:
+                print(f"[refresh] Railway variableUpsert error for {name}: {e}", flush=True)
+
+
+async def refresh_meta_token() -> bool:
+    """Uses the long-lived oc_rt cookie to silently mint a fresh short-lived
+    access_token from Meta (the same implicit-auth redirect the website
+    itself uses on reload), then updates both the in-memory globals (takes
+    effect immediately) and Railway's stored vars (survives a restart)."""
+    global META_TOKEN, GQL_TOKEN
+
+    if not OC_RT:
+        print("[refresh] OC_RT not set — skipping token refresh", flush=True)
+        return False
+
+    url = "https://graph.oculus.com/authenticate_web_application/"
+    params = {
+        "access_token": AC_CLIENT_TOKEN,
+        "method": "post",
+        "redirect_uri": "https://secure.oculus.com/auth/",
+        "state": uuid.uuid4().hex,
+    }
+    cookies = {"oc_rt": OC_RT}
+
+    try:
+        async with aiohttp.ClientSession(cookies=cookies) as session:
+            async with session.get(
+                url, params=params, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                location = resp.headers.get("Location", "")
+                if resp.status not in (301, 302, 303, 307, 308) or "access_token=" not in location:
+                    body = await resp.text()
+                    print(f"[refresh] Refresh failed — status={resp.status} location={location!r} body={body[:300]}", flush=True)
+                    return False
+
+        # Location looks like: https://secure.oculus.com/auth/#access_token=NEW_TOKEN&...
+        fragment = location.split("#", 1)[-1]
+        frag_params = dict(p.split("=", 1) for p in fragment.split("&") if "=" in p)
+        new_token_raw = frag_params.get("access_token")
+        if not new_token_raw:
+            print(f"[refresh] No access_token in redirect fragment: {location}", flush=True)
+            return False
+
+        new_token = urllib.parse.unquote(new_token_raw)
+        META_TOKEN = new_token
+        GQL_TOKEN = new_token
+        print(f"[refresh] Refreshed OK — length={len(new_token)}, starts='{new_token[:8]}...'", flush=True)
+
+        await push_railway_variables({"META_TOKEN": new_token, "GQL_TOKEN": new_token})
+        return True
+    except Exception as e:
+        print(f"[refresh] Error refreshing token: {e}", flush=True)
+        return False
+
+
+@tasks.loop(minutes=TOKEN_REFRESH_MINUTES)
+async def token_refresher():
+    await refresh_meta_token()
+
+
+@token_refresher.before_loop
+async def before_token_refresher():
+    await bot.wait_until_ready()
+
+
+@token_refresher.error
+async def token_refresher_error(error: Exception):
+    print(f"[refresh] Unhandled error, restarting loop: {error!r}", flush=True)
+    if not token_refresher.is_running():
+        token_refresher.restart()
+
+
 @tasks.loop(seconds=POLL_SECONDS)
 async def version_watcher():
     latest = await fetch_latest_version()
@@ -1080,7 +1200,8 @@ async def watcher_error(error: Exception):
 async def on_ready():
     await bot.tree.sync()
     version_watcher.start()
-    print(f"Logged in as {bot.user} — polling every {POLL_SECONDS}s", flush=True)
+    token_refresher.start()
+    print(f"Logged in as {bot.user} — polling every {POLL_SECONDS}s, refreshing token every {TOKEN_REFRESH_MINUTES}m", flush=True)
 
 
 @bot.tree.command(name="setupfiles", description="Register .ts files to auto-update with new symbols, and pick where updates get posted")
@@ -1284,6 +1405,20 @@ async def symbols(interaction: discord.Interaction, file: discord.Attachment):
         followup_msg += f"\n⚠️ {e}"
 
     await interaction.followup.send(content=followup_msg, ephemeral=True)
+
+
+@bot.tree.command(name="refreshtoken", description="Manually trigger a META_TOKEN/GQL_TOKEN refresh using oc_rt")
+async def refreshtoken(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    ok = await refresh_meta_token()
+    if ok:
+        await interaction.followup.send(
+            f"✅ Token refreshed — length={len(META_TOKEN)}, starts=`{META_TOKEN[:8]}...`", ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            "❌ Refresh failed — check deploy logs for `[refresh]` lines for details.", ephemeral=True
+        )
 
 
 @bot.tree.command(name="checkversion", description="Check current Animal Company version on Meta")
