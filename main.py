@@ -1043,7 +1043,7 @@ async def refresh_meta_token() -> bool:
     access_token from Meta (the same implicit-auth redirect the website
     itself uses on reload), then updates both the in-memory globals (takes
     effect immediately) and Railway's stored vars (survives a restart)."""
-    global META_TOKEN, GQL_TOKEN
+    global META_TOKEN
 
     if not OC_RT:
         print("[refresh] OC_RT not set — skipping token refresh", flush=True)
@@ -1079,10 +1079,9 @@ async def refresh_meta_token() -> bool:
 
         new_token = urllib.parse.unquote(new_token_raw)
         META_TOKEN = new_token
-        GQL_TOKEN = new_token
         print(f"[refresh] Refreshed OK — length={len(new_token)}, starts='{new_token[:8]}...'", flush=True)
 
-        await push_railway_variables({"META_TOKEN": new_token, "GQL_TOKEN": new_token})
+        await push_railway_variables({"META_TOKEN": new_token})
         return True
     except Exception as e:
         print(f"[refresh] Error refreshing token: {e}", flush=True)
