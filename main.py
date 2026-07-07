@@ -364,8 +364,8 @@ AC_APP_ID             = "7190422614401072"
 META_CDN              = "https://securecdn.oculus.com/binaries/download/"
 VERSION_FILE          = "version_state.json"
 POLL_SECONDS          = 60
-GQL_URL               = "https://graph.oculus.com/graphql"
-VERSION_DOC_ID        = 3828663700542720
+GQL_URL               = os.environ.get("GQL_URL", "https://graph.oculus.com/graphql")
+VERSION_DOC_ID        = os.environ.get("VERSION_DOC_ID", "3828663700542720")
 
 MANAGED_DIR           = "managed_files"          # registered .ts files live here
 MANAGED_CONFIG_FILE   = "managed_files_config.json"  # {channel_id, files: [...]}
@@ -482,11 +482,9 @@ def update_managed_files(pairs: list[tuple[str, str]]) -> tuple[list, list[str]]
 # This is Meta's own store data (graph.oculus.com/graphql), not OculusDB.
 # ---------------------------------------------------------------------------
 
-async def fetch_app_meta(app_id: str) -> dict | None:
-    """Hits Meta's GraphQL endpoint for the app's current store metadata
-    (images, live channel info, binary list, etc.)."""
+async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
     payload = {
-        "access_token": GQL_TOKEN,
+        "access_token": access_token,
         "variables": json.dumps({"applicationID": app_id}),
         "doc_id": str(VERSION_DOC_ID),
     }
@@ -499,16 +497,30 @@ async def fetch_app_meta(app_id: str) -> dict | None:
             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
         ),
     }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            GQL_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            body = await resp.text()
+            if resp.status != 200:
+                print(f"[watcher] GraphQL fetch error ({access_token[:6]}...): {resp.status} — {body[:500]}", flush=True)
+                return None
+            return json.loads(body)
+
+
+async def fetch_app_meta(app_id: str) -> dict | None:
+    """Hits Meta's GraphQL endpoint for the app's current store metadata
+    (images, live channel info, binary list, etc.). Tries the public
+    GQL_TOKEN first; if Meta rejects it (e.g. OAuthException/invalid
+    parameter — seen when the doc_id starts requiring an authenticated
+    caller), falls back to the real user META_TOKEN."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                GQL_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                body = await resp.text()
-                if resp.status != 200:
-                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}", flush=True)
-                    return None
-                return json.loads(body)
+        result = await _post_app_meta(app_id, GQL_TOKEN)
+        if result is not None:
+            return result
+
+        print("[watcher] GQL_TOKEN request failed — retrying with META_TOKEN", flush=True)
+        return await _post_app_meta(app_id, META_TOKEN)
     except Exception as e:
         print(f"[watcher] GraphQL fetch error: {e}", flush=True)
         return None
