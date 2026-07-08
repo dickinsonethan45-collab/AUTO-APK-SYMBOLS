@@ -524,6 +524,29 @@ def _classify_graphql_failure(status: int, body: str) -> str:
 _last_graphql_failure = {"status": None, "body": ""}
 
 
+# Meta appears to fingerprint requests to graph.oculus.com and silently
+# reject anything that doesn't look like a real browser — even with a
+# 100% valid token, disguising the rejection as a generic OAuthException.
+# Use these on EVERY call to graph.oculus.com, not just the GraphQL one —
+# the auth-refresh endpoint (authenticate_web_application) needs this too.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    ),
+    "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-site": "cross-site",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "priority": "u=1, i",
+}
+
+
 async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
     payload = {
         "access_token": access_token,
@@ -531,23 +554,10 @@ async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
         "doc_id": str(VERSION_DOC_ID),
     }
     headers = {
+        **BROWSER_HEADERS,
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://www.meta.com",
         "Referer": "https://www.meta.com/",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-        ),
-        "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-site": "cross-site",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-dest": "empty",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
-        "priority": "u=1, i",
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -1147,9 +1157,14 @@ async def refresh_meta_token() -> bool:
         "state": uuid.uuid4().hex,
     }
     cookies = _build_session_cookies()
+    headers = {
+        **BROWSER_HEADERS,
+        "Referer": "https://secure.oculus.com/",
+        "Origin": "https://secure.oculus.com",
+    }
 
     try:
-        async with aiohttp.ClientSession(cookies=cookies) as session:
+        async with aiohttp.ClientSession(cookies=cookies, headers=headers) as session:
             async with session.get(
                 url, params=params, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
@@ -1614,9 +1629,14 @@ async def refreshdebug(interaction: discord.Interaction):
     }
     cookies = _build_session_cookies()
     cookie_names = ", ".join(cookies.keys())
+    headers = {
+        **BROWSER_HEADERS,
+        "Referer": "https://secure.oculus.com/",
+        "Origin": "https://secure.oculus.com",
+    }
 
     try:
-        async with aiohttp.ClientSession(cookies=cookies) as session:
+        async with aiohttp.ClientSession(cookies=cookies, headers=headers) as session:
             async with session.get(
                 url, params=params, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
