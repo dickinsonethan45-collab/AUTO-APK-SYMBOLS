@@ -378,6 +378,7 @@ VERSION_FILE          = "version_state.json"
 POLL_SECONDS          = 60
 GQL_URL               = os.environ.get("GQL_URL", "https://graph.oculus.com/graphql")
 VERSION_DOC_ID        = os.environ.get("VERSION_DOC_ID", "3828663700542720")
+VERSION_VARIABLES_KEY = os.environ.get("VERSION_VARIABLES_KEY", "applicationID")
 
 MANAGED_DIR           = "managed_files"          # registered .ts files live here
 MANAGED_CONFIG_FILE   = "managed_files_config.json"  # {channel_id, files: [...]}
@@ -494,10 +495,39 @@ def update_managed_files(pairs: list[tuple[str, str]]) -> tuple[list, list[str]]
 # This is Meta's own store data (graph.oculus.com/graphql), not OculusDB.
 # ---------------------------------------------------------------------------
 
+def _classify_graphql_failure(status: int, body: str) -> str:
+    """Best-effort guess at WHICH part of the pipeline broke, based on
+    patterns we've actually seen break in the past (token expiry, doc_id
+    rotation, header/fingerprint rejection). Not authoritative — just a
+    starting point so troubleshooting doesn't start from zero every time."""
+    if "backports.zstd" in body or "Please install `Brotli`" in body:
+        return (
+            "Compression codec mismatch — Accept-Encoding header lists an "
+            "encoding aiohttp can't decode. Strip it down to plain `gzip, deflate`."
+        )
+    if "OAuthException" in body and '"code":100' in body:
+        return (
+            "Generic OAuth error (code 100) — this shape has meant THREE "
+            "different root causes before: (1) META_TOKEN/GQL_TOKEN actually "
+            "expired, (2) doc_id got rotated by Meta, or (3) Meta is "
+            "fingerprint-blocking the request headers even with a valid "
+            "token. Check in that order: try /refreshtoken first, then "
+            "compare doc_id + variables shape against a live Reqable/browser "
+            "capture of graph.oculus.com/graphql, then compare full request "
+            "headers (sec-ch-ua, sec-fetch-*, etc.) against the same capture."
+        )
+    if status == 0:
+        return "Network-level failure (timeout/DNS/connection) — likely transient, probably not Meta rejecting anything."
+    return f"Unrecognized failure shape (status={status}) — no pattern match yet, needs fresh investigation."
+
+
+_last_graphql_failure = {"status": None, "body": ""}
+
+
 async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
     payload = {
         "access_token": access_token,
-        "variables": json.dumps({"applicationID": app_id}),
+        "variables": json.dumps({VERSION_VARIABLES_KEY: app_id}),
         "doc_id": str(VERSION_DOC_ID),
     }
     headers = {
@@ -525,6 +555,8 @@ async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
         ) as resp:
             body = await resp.text()
             if resp.status != 200:
+                _last_graphql_failure["status"] = resp.status
+                _last_graphql_failure["body"] = body[:500]
                 print(f"[watcher] GraphQL fetch error ({access_token[:6]}...): {resp.status} — {body[:500]}", flush=True)
                 return None
             return json.loads(body)
@@ -1217,6 +1249,9 @@ async def version_watcher():
         # floods this channel with a duplicate red embed every POLL_SECONDS.
         if not _meta_outage["down"]:
             _meta_outage["down"] = True
+            diagnosis = _classify_graphql_failure(
+                _last_graphql_failure["status"], _last_graphql_failure["body"]
+            )
             embed = discord.Embed(color=0xff0000)
             embed.set_author(name="AMB Symbols", icon_url=bot.user.display_avatar.url)
             embed.add_field(
@@ -1224,6 +1259,7 @@ async def version_watcher():
                 value="Could not reach Meta's GraphQL endpoint. Retrying quietly in the background.",
                 inline=False,
             )
+            embed.add_field(name="🔍  Likely cause", value=diagnosis, inline=False)
             embed.set_footer(text=f"Checked at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
             await logger.send(embed=embed)
         else:
