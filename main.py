@@ -516,7 +516,7 @@ async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
         "sec-fetch-dest": "empty",
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Encoding": "gzip, deflate, br",
         "priority": "u=1, i",
     }
     async with aiohttp.ClientSession() as session:
