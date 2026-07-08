@@ -47,6 +47,13 @@ KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
 
 # --- Auto-refresh for the short-lived META_TOKEN/GQL_TOKEN ---------------
 OC_RT = _clean_token(os.environ.get("OC_RT", ""))  # long-lived Oculus refresh cookie
+# Optional companion session cookies. Some Meta auth flows validate oc_rt
+# against a bound session fingerprint (commonly the 'sb' cookie) rather than
+# accepting oc_rt in total isolation — if refresh keeps failing with a fresh
+# oc_rt, try setting these too from the same browser capture.
+OC_SB = _clean_token(os.environ.get("OC_SB", ""))
+OC_AC_AT = _clean_token(os.environ.get("OC_AC_AT", ""))
+OC_WWW_AT = _clean_token(os.environ.get("OC_WWW_AT", ""))
 RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_PROJECT_ID = "c4205da6-ceac-471b-b5af-c076fec2cf47"
 RAILWAY_ENVIRONMENT_ID = "8f34eb7c-da05-4fb8-be35-0cc180cb084b"
@@ -57,6 +64,7 @@ TOKEN_REFRESH_MINUTES = 10  # observed token lifetime is ~15-20 min — refresh 
 
 print(f"[startup] META_TOKEN loaded, length={len(META_TOKEN)}, starts='{META_TOKEN[:8]}...'", flush=True)
 print(f"[startup] GQL_TOKEN loaded, length={len(GQL_TOKEN)}, starts='{GQL_TOKEN[:8]}...'", flush=True)
+print(f"[startup] OC_RT loaded, length={len(OC_RT)}, starts='{OC_RT[:8] if OC_RT else '(empty)'}...'", flush=True)
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
 CANONICAL = [
@@ -1070,6 +1078,12 @@ async def refresh_meta_token() -> bool:
         "state": uuid.uuid4().hex,
     }
     cookies = {"oc_rt": OC_RT}
+    if OC_SB:
+        cookies["sb"] = OC_SB
+    if OC_AC_AT:
+        cookies["oc_ac_at"] = OC_AC_AT
+    if OC_WWW_AT:
+        cookies["oc_www_at"] = OC_WWW_AT
 
     try:
         async with aiohttp.ClientSession(cookies=cookies) as session:
