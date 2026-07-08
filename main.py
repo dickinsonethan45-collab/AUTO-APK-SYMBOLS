@@ -47,13 +47,6 @@ KEYSTORE_PASSWORD = os.environ["KEYSTORE_PASSWORD"]
 
 # --- Auto-refresh for the short-lived META_TOKEN/GQL_TOKEN ---------------
 OC_RT = _clean_token(os.environ.get("OC_RT", ""))  # long-lived Oculus refresh cookie
-# Optional companion session cookies. Some Meta auth flows validate oc_rt
-# against a bound session fingerprint (commonly the 'sb' cookie) rather than
-# accepting oc_rt in total isolation — if refresh keeps failing with a fresh
-# oc_rt, try setting these too from the same browser capture.
-OC_SB = _clean_token(os.environ.get("OC_SB", ""))
-OC_AC_AT = _clean_token(os.environ.get("OC_AC_AT", ""))
-OC_WWW_AT = _clean_token(os.environ.get("OC_WWW_AT", ""))
 RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_PROJECT_ID = "c4205da6-ceac-471b-b5af-c076fec2cf47"
 RAILWAY_ENVIRONMENT_ID = "8f34eb7c-da05-4fb8-be35-0cc180cb084b"
@@ -64,7 +57,6 @@ TOKEN_REFRESH_MINUTES = 10  # observed token lifetime is ~15-20 min — refresh 
 
 print(f"[startup] META_TOKEN loaded, length={len(META_TOKEN)}, starts='{META_TOKEN[:8]}...'", flush=True)
 print(f"[startup] GQL_TOKEN loaded, length={len(GQL_TOKEN)}, starts='{GQL_TOKEN[:8]}...'", flush=True)
-print(f"[startup] OC_RT loaded, length={len(OC_RT)}, starts='{OC_RT[:8] if OC_RT else '(empty)'}...'", flush=True)
 
 # Full canonical IL2CPP API name list (Map4 order first, then Map3-only extras)
 CANONICAL = [
@@ -372,8 +364,8 @@ AC_APP_ID             = "7190422614401072"
 META_CDN              = "https://securecdn.oculus.com/binaries/download/"
 VERSION_FILE          = "version_state.json"
 POLL_SECONDS          = 60
-GQL_URL               = os.environ.get("GQL_URL", "https://graph.oculus.com/graphql")
-VERSION_DOC_ID        = os.environ.get("VERSION_DOC_ID", "3828663700542720")
+GQL_URL               = "https://graph.oculus.com/graphql"
+VERSION_DOC_ID        = 3828663700542720
 
 MANAGED_DIR           = "managed_files"          # registered .ts files live here
 MANAGED_CONFIG_FILE   = "managed_files_config.json"  # {channel_id, files: [...]}
@@ -490,9 +482,11 @@ def update_managed_files(pairs: list[tuple[str, str]]) -> tuple[list, list[str]]
 # This is Meta's own store data (graph.oculus.com/graphql), not OculusDB.
 # ---------------------------------------------------------------------------
 
-async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
+async def fetch_app_meta(app_id: str) -> dict | None:
+    """Hits Meta's GraphQL endpoint for the app's current store metadata
+    (images, live channel info, binary list, etc.)."""
     payload = {
-        "access_token": access_token,
+        "access_token": GQL_TOKEN,
         "variables": json.dumps({"applicationID": app_id}),
         "doc_id": str(VERSION_DOC_ID),
     }
@@ -505,30 +499,16 @@ async def _post_app_meta(app_id: str, access_token: str) -> dict | None:
             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
         ),
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            GQL_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                print(f"[watcher] GraphQL fetch error ({access_token[:6]}...): {resp.status} — {body[:500]}", flush=True)
-                return None
-            return json.loads(body)
-
-
-async def fetch_app_meta(app_id: str) -> dict | None:
-    """Hits Meta's GraphQL endpoint for the app's current store metadata
-    (images, live channel info, binary list, etc.). Tries the public
-    GQL_TOKEN first; if Meta rejects it (e.g. OAuthException/invalid
-    parameter — seen when the doc_id starts requiring an authenticated
-    caller), falls back to the real user META_TOKEN."""
     try:
-        result = await _post_app_meta(app_id, GQL_TOKEN)
-        if result is not None:
-            return result
-
-        print("[watcher] GQL_TOKEN request failed — retrying with META_TOKEN", flush=True)
-        return await _post_app_meta(app_id, META_TOKEN)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                GQL_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    print(f"[watcher] GraphQL fetch error: {resp.status} — {body[:500]}", flush=True)
+                    return None
+                return json.loads(body)
     except Exception as e:
         print(f"[watcher] GraphQL fetch error: {e}", flush=True)
         return None
@@ -1016,7 +996,6 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 _meta_outage = {"down": False}
-_oc_rt_dead = {"flagged": False}
 
 
 async def push_railway_variables(vars_to_set: dict):
@@ -1078,12 +1057,6 @@ async def refresh_meta_token() -> bool:
         "state": uuid.uuid4().hex,
     }
     cookies = {"oc_rt": OC_RT}
-    if OC_SB:
-        cookies["sb"] = OC_SB
-    if OC_AC_AT:
-        cookies["oc_ac_at"] = OC_AC_AT
-    if OC_WWW_AT:
-        cookies["oc_www_at"] = OC_WWW_AT
 
     try:
         async with aiohttp.ClientSession(cookies=cookies) as session:
@@ -1094,12 +1067,6 @@ async def refresh_meta_token() -> bool:
                 if resp.status not in (301, 302, 303, 307, 308) or "access_token=" not in location:
                     body = await resp.text()
                     print(f"[refresh] Refresh failed — status={resp.status} location={location!r} body={body[:300]}", flush=True)
-                    # A 400/OAuthException here specifically means the oc_rt
-                    # session cookie itself is dead — no amount of retrying
-                    # will fix this, it needs a human to grab a fresh oc_rt
-                    # from a logged-in browser session. Alert once so this
-                    # doesn't just sit silently in Railway logs.
-                    await _alert_oc_rt_dead(body[:300])
                     return False
 
         # Location looks like: https://secure.oculus.com/auth/#access_token=NEW_TOKEN&...
@@ -1108,54 +1075,17 @@ async def refresh_meta_token() -> bool:
         new_token_raw = frag_params.get("access_token")
         if not new_token_raw:
             print(f"[refresh] No access_token in redirect fragment: {location}", flush=True)
-            await _alert_oc_rt_dead("redirect had no access_token fragment")
             return False
 
         new_token = urllib.parse.unquote(new_token_raw)
         META_TOKEN = new_token
         print(f"[refresh] Refreshed OK — length={len(new_token)}, starts='{new_token[:8]}...'", flush=True)
 
-        if _oc_rt_dead["flagged"]:
-            _oc_rt_dead["flagged"] = False
-            logger = bot.get_channel(LOGGER_CHANNEL_ID) or await bot.fetch_channel(LOGGER_CHANNEL_ID)
-            embed = discord.Embed(color=0x2ecc71)
-            embed.set_author(name="AMB Symbols", icon_url=bot.user.display_avatar.url)
-            embed.add_field(name="🟢  Auth recovered", value="META_TOKEN refresh is working again.", inline=False)
-            await logger.send(embed=embed)
-
         await push_railway_variables({"META_TOKEN": new_token})
         return True
     except Exception as e:
         print(f"[refresh] Error refreshing token: {e}", flush=True)
         return False
-
-
-async def _alert_oc_rt_dead(detail: str):
-    """Fires once (not every 10-min cycle) when OC_RT itself is rejected by
-    Meta — this means a human needs to grab a fresh oc_rt cookie from a
-    logged-in browser session and update the Railway env var. Retrying
-    won't fix it."""
-    if _oc_rt_dead["flagged"]:
-        return
-    _oc_rt_dead["flagged"] = True
-    try:
-        logger = bot.get_channel(LOGGER_CHANNEL_ID) or await bot.fetch_channel(LOGGER_CHANNEL_ID)
-        embed = discord.Embed(color=0xff0000)
-        embed.set_author(name="AMB Symbols", icon_url=bot.user.display_avatar.url)
-        embed.add_field(
-            name="🔴  OC_RT is dead",
-            value=(
-                "Meta rejected the oc_rt refresh cookie — this can't self-heal.\n"
-                "Log into meta.com/oculus.com in a browser, grab a fresh `oc_rt` "
-                "cookie from DevTools, and update `OC_RT` in Railway, then run "
-                "`/refreshtoken`.\n"
-                f"```{detail}```"
-            ),
-            inline=False,
-        )
-        await logger.send(embed=embed)
-    except Exception as e:
-        print(f"[refresh] Failed to post oc_rt-dead alert: {e}", flush=True)
 
 
 @tasks.loop(minutes=TOKEN_REFRESH_MINUTES)
