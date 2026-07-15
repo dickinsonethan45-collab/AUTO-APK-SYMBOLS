@@ -713,22 +713,61 @@ def get_icon_url(meta) -> str | None:
     ])
 
 
-async def download_apk(binary_id: str, dest: str):
-    """Download APK from Meta CDN using the stored Meta token."""
+class _AuthLikelyStale(RuntimeError):
+    def __init__(self, status: int, body_preview: str):
+        self.status = status
+        self.body_preview = body_preview
+        super().__init__(f"HTTP {status}: {body_preview}")
+
+
+async def _download_apk_once(binary_id: str, dest: str):
     url = f"{META_CDN}?id={binary_id}&access_token={META_TOKEN}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
             if resp.status != 200:
                 body_preview = (await resp.text())[:300]
-                if resp.status in (401, 403):
-                    raise RuntimeError(
-                        f"Meta rejected META_TOKEN (HTTP {resp.status}) — token is expired or malformed. "
-                        f"Refresh oc_ac_at / META_TOKEN in Railway. Body: {body_preview}"
-                    )
+                # 404 included alongside 401/403: Meta's CDN has been observed
+                # returning a plain 404 for a stale/invalid access_token, not
+                # just for a genuinely-missing binary_id. Since binary_id is
+                # always freshly re-fetched right before this call (see
+                # buildapk), a 404 here is far more likely to be a bad token
+                # than a nonexistent binary.
+                if resp.status in (401, 403, 404):
+                    raise _AuthLikelyStale(resp.status, body_preview)
                 raise RuntimeError(f"Download failed (HTTP {resp.status}): {body_preview}")
             with open(dest, "wb") as f:
                 async for chunk in resp.content.iter_chunked(1 << 20):
                     f.write(chunk)
+
+
+async def download_apk(binary_id: str, dest: str):
+    """Download APK from Meta CDN using the stored Meta token. On a
+    401/403/404 (all observed to correlate with a stale META_TOKEN, not
+    necessarily a 'real' auth rejection or a missing binary), force one
+    refresh_meta_token() and retry exactly once before giving up — this
+    catches the token going stale between the 10-min refresh cycles instead
+    of surfacing as a confusing 404 that looks like a CDN propagation delay."""
+    try:
+        await _download_apk_once(binary_id, dest)
+        return
+    except _AuthLikelyStale as e:
+        print(f"[download_apk] HTTP {e.status} on first attempt — forcing refresh_meta_token() and retrying once", flush=True)
+
+    refreshed = await refresh_meta_token()
+    if not refreshed:
+        raise RuntimeError(
+            "Meta rejected META_TOKEN and the forced refresh also failed — "
+            "oc_rt is likely dead and needs a fresh cookie pulled from a logged-in browser session "
+            "(see the [refresh] logs / #alerts for the access_denied detail)."
+        )
+
+    try:
+        await _download_apk_once(binary_id, dest)
+    except _AuthLikelyStale as e2:
+        raise RuntimeError(
+            f"Still rejected (HTTP {e2.status}) even after a successful token refresh — "
+            f"not a stale-token issue this time. Body: {e2.body_preview}"
+        )
 
 
 def extract_so_from_apk(apk_path: str, dest_dir: str) -> str:
